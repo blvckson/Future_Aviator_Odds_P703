@@ -1,4 +1,4 @@
-name: Build Aviator Screen Monitor P703
+        name: Build Aviator P703
 
 on:
   workflow_dispatch:
@@ -18,9 +18,9 @@ jobs:
         run: |
           set -e
           rm -rf extracted
-          mkdir extracted
+          mkdir -p extracted
 
-          unzip -q Aviator_Screen_Monitor_P703_v0.1.zip -d extracted
+          unzip -q Future_Aviator_Odds_P703_Compatible.zip -d extracted
 
           PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)
 
@@ -37,23 +37,17 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Install Gradle
-        run: |
-          set -e
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /tmp/gradle
-          echo "/tmp/gradle/gradle-8.5/bin" >> "$GITHUB_PATH"
+      - name: Make Gradle executable
+        run: chmod +x "$PROJECT_DIR/gradlew"
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          gradle --no-daemon --stacktrace assembleDebug
+        run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aviator-Screen-Monitor-P703-APK
+          name: aviator-p703-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
