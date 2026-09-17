@@ -1,4 +1,4 @@
-name: Build Aviator P703
+name: Build Aviator Screen Monitor P703
 
 on:
   workflow_dispatch:
@@ -17,15 +17,17 @@ jobs:
       - name: Extract Android project
         run: |
           set -e
+
           rm -rf extracted
           mkdir -p extracted
+
           unzip -q Future_Aviator_Odds_P703_Compatible.zip -d extracted
 
           PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Android project was not found inside the ZIP."
-            find extracted -maxdepth 4 -type f | head -100
+            find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
 
@@ -43,12 +45,699 @@ jobs:
         with:
           gradle-version: "8.2"
 
+      - name: Add Google Maven repository
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("settings.gradle.kts")
+          if p.exists():
+              s = p.read_text()
+              if "google()" not in s:
+                  s = s.replace(
+                      "repositories {",
+                      "repositories {\n        google()",
+                      1
+                  )
+                  p.write_text(s)
+          PY
+
+      - name: Replace app Gradle configuration
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.aviatorai"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.aviatorai.p703"
+                  minSdk = 23
+                  targetSdk = 28
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("androidx.core:core-ktx:1.13.1")
+}
+          EOF
+
+      - name: Replace screen monitor layout
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p app/src/main/java/com/example/aviatorai
+
+          cat > app/src/main/java/com/example/aviatorai/MainActivity.kt <<'EOF'
+          package com.example.aviatorai
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private val requestCode = 7001
+              private lateinit var statusText: TextView
+              private lateinit var startButton: Button
+              private lateinit var stopButton: Button
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  statusText = findViewById(R.id.statusText)
+                  startButton = findViewById(R.id.startButton)
+                  stopButton = findViewById(R.id.stopButton)
+
+                  startButton.setOnClickListener {
+                      requestScreenCapture()
+                  }
+
+                  stopButton.setOnClickListener {
+                      stopService(
+                          Intent(this, ScreenCaptureService::class.java)
+                      )
+                      statusText.text = "● MONITORING OFF"
+                  }
+
+                  statusText.text = "● MONITORING OFF"
+              }
+
+              private fun requestScreenCapture() {
+                  val manager =
+                      getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                          as MediaProjectionManager
+
+                  startActivityForResult(
+                      manager.createScreenCaptureIntent(),
+                      requestCode
+                  )
+              }
+
+              override fun onActivityResult(
+                  requestCode: Int,
+                  resultCode: Int,
+                  data: Intent?
+              ) {
+                  super.onActivityResult(requestCode, resultCode, data)
+
+                  if (requestCode != this.requestCode) return
+
+                  if (resultCode == RESULT_OK && data != null) {
+                      val serviceIntent =
+                          Intent(this, ScreenCaptureService::class.java).apply {
+                              putExtra("resultCode", resultCode)
+                              putExtra("data", data)
+                          }
+
+                      startService(serviceIntent)
+
+                      statusText.text = "● MONITORING ACTIVE"
+                  } else {
+                      statusText.text = "● MONITORING CANCELLED"
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/aviatorai/ScreenCaptureService.kt <<'EOF'
+          package com.example.aviatorai
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.Image
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+          import com.google.mlkit.vision.common.InputImage
+          import com.google.mlkit.vision.text.TextRecognition
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+          import java.util.Locale
+          import java.util.regex.Pattern
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.min
+
+          class ScreenCaptureService : Service() {
+
+              private var mediaProjection: MediaProjection? = null
+              private var virtualDisplay: VirtualDisplay? = null
+              private var imageReader: ImageReader? = null
+
+              private lateinit var handlerThread: HandlerThread
+              private lateinit var handler: Handler
+
+              private val recognizer =
+                  TextRecognition.getClient(
+                      TextRecognizerOptions.DEFAULT_OPTIONS
+                  )
+
+              private val history = ArrayList<Double>()
+
+              private var lastProcessed = 0L
+              private var lastDetected = 0.0
+
+              override fun onCreate() {
+                  super.onCreate()
+
+                  handlerThread =
+                      HandlerThread("AviatorScreenMonitor")
+
+                  handlerThread.start()
+                  handler = Handler(handlerThread.looper)
+
+                  createNotificationChannel()
+                  startForeground(
+                      9001,
+                      createNotification()
+                  )
+              }
+
+              override fun onStartCommand(
+                  intent: Intent?,
+                  flags: Int,
+                  startId: Int
+              ): Int {
+
+                  if (intent == null) {
+                      return START_STICKY
+                  }
+
+                  val resultCode =
+                      intent.getIntExtra("resultCode", -1)
+
+                  val data =
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          intent.getParcelableExtra(
+                              "data",
+                              Intent::class.java
+                          )
+                      } else {
+                          @Suppress("DEPRECATION")
+                          intent.getParcelableExtra("data")
+                      }
+
+                  if (resultCode != -1 && data != null) {
+                      startProjection(resultCode, data)
+                  }
+
+                  return START_STICKY
+              }
+
+              private fun startProjection(
+                  resultCode: Int,
+                  data: Intent
+              ) {
+                  if (virtualDisplay != null) return
+
+                  val manager =
+                      getSystemService(
+                          Context.MEDIA_PROJECTION_SERVICE
+                      ) as MediaProjectionManager
+
+                  mediaProjection =
+                      manager.getMediaProjection(
+                          resultCode,
+                          data
+                      )
+
+                  val metrics =
+                      resources.displayMetrics
+
+                  val width = metrics.widthPixels
+                  val height = metrics.heightPixels
+                  val density = metrics.densityDpi
+
+                  imageReader =
+                      ImageReader.newInstance(
+                          width,
+                          height,
+                          PixelFormat.RGBA_8888,
+                          2
+                      )
+
+                  virtualDisplay =
+                      mediaProjection?.createVirtualDisplay(
+                          "AviatorMonitor",
+                          width,
+                          height,
+                          density,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                          imageReader?.surface,
+                          null,
+                          handler
+                      )
+
+                  imageReader?.setOnImageAvailableListener(
+                      { reader ->
+                          processLatestImage(reader)
+                      },
+                      handler
+                  )
+              }
+
+              private fun processLatestImage(
+                  reader: ImageReader
+              ) {
+                  val now = System.currentTimeMillis()
+
+                  if (now - lastProcessed < 800) {
+                      try {
+                          reader.acquireLatestImage()?.close()
+                      } catch (_: Exception) {
+                      }
+                      return
+                  }
+
+                  lastProcessed = now
+
+                  var image: Image? = null
+
+                  try {
+                      image = reader.acquireLatestImage()
+                          ?: return
+
+                      val bitmap =
+                          imageToBitmap(image)
+                              ?: return
+
+                      val input =
+                          InputImage.fromBitmap(bitmap, 0)
+
+                      recognizer.process(input)
+                          .addOnSuccessListener { result ->
+                              detectMultiplier(result.text)
+                          }
+                          .addOnCompleteListener {
+                              bitmap.recycle()
+                          }
+
+                  } catch (_: Exception) {
+                      image?.close()
+                  } finally {
+                      image?.close()
+                  }
+              }
+
+              private fun imageToBitmap(
+                  image: Image
+              ): Bitmap? {
+
+                  val plane = image.planes.firstOrNull()
+                      ?: return null
+
+                  val buffer = plane.buffer
+                  val pixelStride = plane.pixelStride
+                  val rowStride = plane.rowStride
+                  val rowPadding =
+                      rowStride -
+                          pixelStride * image.width
+
+                  val bitmapWidth =
+                      image.width +
+                          rowPadding / pixelStride
+
+                  val bitmap =
+                      Bitmap.createBitmap(
+                          bitmapWidth,
+                          image.height,
+                          Bitmap.Config.ARGB_8888
+                      )
+
+                  buffer.rewind()
+                  bitmap.copyPixelsFromBuffer(buffer)
+
+                  return Bitmap.createBitmap(
+                      bitmap,
+                      0,
+                      0,
+                      image.width,
+                      image.height
+                  )
+              }
+
+              private fun detectMultiplier(
+                  text: String
+              ) {
+                  val normalized =
+                      text.replace(',', '.')
+
+                  val pattern =
+                      Pattern.compile(
+                          "(?<!\\d)(\\d{1,4}(?:\\.\\d{1,2})?)\\s*[xX]?"
+                      )
+
+                  val matcher =
+                      pattern.matcher(normalized)
+
+                  val candidates =
+                      ArrayList<Double>()
+
+                  while (matcher.find()) {
+                      val value =
+                          matcher.group(1)
+                              ?.toDoubleOrNull()
+
+                      if (
+                          value != null &&
+                          value >= 1.0 &&
+                          value <= 10000.0
+                      ) {
+                          candidates.add(value)
+                      }
+                  }
+
+                  if (candidates.isEmpty()) return
+
+                  val value =
+                      candidates.maxOrNull()
+                          ?: return
+
+                  if (abs(value - lastDetected) < 0.001) {
+                      return
+                  }
+
+                  lastDetected = value
+                  history.add(value)
+
+                  while (history.size > 100) {
+                      history.removeAt(0)
+                  }
+
+                  val prediction =
+                      analyzeHistory(history)
+
+                  sendUpdate(
+                      value,
+                      prediction
+                  )
+              }
+
+              private fun analyzeHistory(
+                  values: List<Double>
+              ): Double {
+
+                  if (values.isEmpty()) {
+                      return 1.00
+                  }
+
+                  val recent =
+                      values.takeLast(
+                          min(10, values.size)
+                      )
+
+                  val average =
+                      recent.average()
+
+                  val sorted =
+                      values.sorted()
+
+                  val median =
+                      if (sorted.size % 2 == 0) {
+                          (
+                              sorted[sorted.size / 2 - 1] +
+                                  sorted[sorted.size / 2]
+                              ) / 2.0
+                      } else {
+                          sorted[sorted.size / 2]
+                      }
+
+                  val meanDeviation =
+                      recent
+                          .map {
+                              abs(it - average)
+                          }
+                          .average()
+
+                  val stability =
+                      1.0 /
+                          (1.0 + meanDeviation)
+
+                  val estimate =
+                      average * 0.55 +
+                          median * 0.25 +
+                          average * stability * 0.20
+
+                  return max(
+                      1.00,
+                      min(estimate, 100.0)
+                  )
+              }
+
+              private fun sendUpdate(
+                  detected: Double,
+                  prediction: Double
+              ) {
+                  val intent =
+                      Intent("AVIATOR_MONITOR_UPDATE")
+
+                  intent.setPackage(packageName)
+
+                  intent.putExtra(
+                      "detected",
+                      String.format(
+                          Locale.US,
+                          "%.2fx",
+                          detected
+                      )
+                  )
+
+                  intent.putExtra(
+                      "prediction",
+                      String.format(
+                          Locale.US,
+                          "%.2fx",
+                          prediction
+                      )
+                  )
+
+                  sendBroadcast(intent)
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val channel =
+                          NotificationChannel(
+                              "aviator_monitor",
+                              "Aviator Screen Monitor",
+                              NotificationManager.IMPORTANCE_LOW
+                          )
+
+                      val manager =
+                          getSystemService(
+                              NotificationManager::class.java
+                          )
+
+                      manager.createNotificationChannel(
+                          channel
+                      )
+                  }
+              }
+
+              private fun createNotification(): Notification {
+                  return if (Build.VERSION.SDK_INT >= 26) {
+    Notification.Builder(this, "aviator_monitor")
+        .setContentTitle("Aviator Screen Monitor")
+        .setContentText("Monitoring screen for multipliers")
+        .setSmallIcon(android.R.drawable.ic_menu_view)
+        .setOngoing(true)
+        .build()
+} else {
+    @Suppress("DEPRECATION")
+    Notification.Builder(this)
+        .setContentTitle("Aviator Screen Monitor")
+        .setContentText("Monitoring screen for multipliers")
+        .setSmallIcon(android.R.drawable.ic_menu_view)
+        .setOngoing(true)
+        .build()
+}
+              }
+
+              override fun onDestroy() {
+                  imageReader?.close()
+                  virtualDisplay?.release()
+                  mediaProjection?.stop()
+                  recognizer.close()
+
+                  if (::handlerThread.isInitialized) {
+                      handlerThread.quitSafely()
+                  }
+
+                  super.onDestroy()
+              }
+
+              override fun onBind(
+                  intent: Intent?
+              ): IBinder? = null
+          }
+          EOF
+
+      - name: Replace screen monitor layout
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p app/src/main/res/layout
+
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+
+          <LinearLayout
+              xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="24dp">
+
+              <TextView
+                  android:id="@+id/titleText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="AVIATOR SCREEN MONITOR"
+                  android:textSize="22sp"
+                  android:textStyle="bold"
+                  android:gravity="center"
+                  android:padding="12dp"/>
+
+              <TextView
+                  android:id="@+id/statusText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="● MONITORING OFF"
+                  android:textSize="18sp"
+                  android:gravity="center"
+                  android:padding="18dp"/>
+
+              <TextView
+                  android:id="@+id/detectedText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Detected: --"
+                  android:textSize="18sp"
+                  android:padding="12dp"/>
+
+              <TextView
+                  android:id="@+id/predictionText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Statistical estimate: --"
+                  android:textSize="20sp"
+                  android:textStyle="bold"
+                  android:padding="12dp"/>
+
+              <Button
+                  android:id="@+id/startButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="START SCREEN MONITOR"
+                  android:layout_marginTop="24dp"/>
+
+              <Button
+                  android:id="@+id/stopButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="STOP MONITOR"
+                  android:layout_marginTop="12dp"/>
+
+              <TextView
+                  android:id="@+id/infoText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="The monitor reads visible multiplier text from the shared screen and builds a statistical history."
+                  android:textSize="14sp"
+                  android:padding="16dp"/>
+
+          </LinearLayout>
+          EOF
+
+      - name: Replace Android manifest
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission
+                  android:name="android.permission.FOREGROUND_SERVICE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Aviator Screen Monitor"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action
+                              android:name="android.intent.action.MAIN" />
+
+                          <category
+                              android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+
+                  <service
+                      android:name=".ScreenCaptureService"
+                      android:exported="false" />
+
+              </application>
+
+          </manifest>
+          EOF
+
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleDebug
+        run: |
+          gradle clean assembleDebug --stacktrace
+
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          test -f "$APK"
+
+          echo "APK created:"
+          ls -lh "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: aviator-p703-apk
+          name: aviator-p703-screen-monitor-v2
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
