@@ -1,4 +1,4 @@
-        name: Build Aviator P703
+name: Build Aviator P703
 
 on:
   workflow_dispatch:
@@ -19,7 +19,6 @@ jobs:
           set -e
           rm -rf extracted
           mkdir -p extracted
-
           unzip -q Future_Aviator_Odds_P703_Compatible.zip -d extracted
 
           PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)
@@ -37,7 +36,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Make Gradle executable
         run: chmod +x "$PROJECT_DIR/gradlew"
