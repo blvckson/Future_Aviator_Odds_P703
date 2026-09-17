@@ -17,7 +17,6 @@ jobs:
       - name: Extract Android project
         run: |
           set -e
-
           rm -rf extracted
           mkdir -p extracted
 
@@ -27,12 +26,11 @@ jobs:
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Android project was not found inside the ZIP."
-            find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
 
-          echo "Android project found at: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project: $PROJECT_DIR"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -45,25 +43,7 @@ jobs:
         with:
           gradle-version: "8.2"
 
-      - name: Add Google Maven repository
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("settings.gradle.kts")
-          if p.exists():
-              s = p.read_text()
-              if "google()" not in s:
-                  s = s.replace(
-                      "repositories {",
-                      "repositories {\n        google()",
-                      1
-                  )
-                  p.write_text(s)
-          PY
-
-      - name: Replace app Gradle configuration
+      - name: Configure Android project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           cat > app/build.gradle.kts <<'EOF'
@@ -95,12 +75,11 @@ jobs:
           }
 
           dependencies {
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-    implementation("androidx.core:core-ktx:1.13.1")
-}
+              implementation("com.google.mlkit:text-recognition:16.0.1")
+          }
           EOF
 
-      - name: Replace screen monitor layout
+      - name: Create MainActivity
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           mkdir -p app/src/main/java/com/example/aviatorai
@@ -109,8 +88,10 @@ jobs:
           package com.example.aviatorai
 
           import android.app.Activity
+          import android.content.BroadcastReceiver
           import android.content.Context
           import android.content.Intent
+          import android.content.IntentFilter
           import android.media.projection.MediaProjectionManager
           import android.os.Bundle
           import android.widget.Button
@@ -119,36 +100,69 @@ jobs:
           class MainActivity : Activity() {
 
               private val requestCode = 7001
+
               private lateinit var statusText: TextView
-              private lateinit var startButton: Button
-              private lateinit var stopButton: Button
+              private lateinit var detectedText: TextView
+              private lateinit var predictionText: TextView
+
+              private val monitorReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      if (intent?.action != "AVIATOR_MONITOR_UPDATE") return
+
+                      val detected =
+                          intent.getStringExtra("detected") ?: "--"
+
+                      val prediction =
+                          intent.getStringExtra("prediction") ?: "--"
+
+                      detectedText.text =
+                          "Detected multiplier: $detected"
+
+                      predictionText.text =
+                          "Statistical estimate: $prediction"
+                  }
+              }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   setContentView(R.layout.activity_main)
 
                   statusText = findViewById(R.id.statusText)
-                  startButton = findViewById(R.id.startButton)
-                  stopButton = findViewById(R.id.stopButton)
+                  detectedText = findViewById(R.id.detectedText)
+                  predictionText = findViewById(R.id.predictionText)
 
-                  startButton.setOnClickListener {
-                      requestScreenCapture()
-                  }
+                  findViewById<Button>(R.id.startButton)
+                      .setOnClickListener {
+                          requestScreenCapture()
+                      }
 
-                  stopButton.setOnClickListener {
-                      stopService(
-                          Intent(this, ScreenCaptureService::class.java)
-                      )
-                      statusText.text = "● MONITORING OFF"
-                  }
+                  findViewById<Button>(R.id.stopButton)
+                      .setOnClickListener {
+                          stopService(
+                              Intent(
+                                  this,
+                                  ScreenCaptureService::class.java
+                              )
+                          )
 
-                  statusText.text = "● MONITORING OFF"
+                          statusText.text =
+                              "● MONITORING OFF"
+                      }
+
+                  registerReceiver(
+                      monitorReceiver,
+                      IntentFilter("AVIATOR_MONITOR_UPDATE")
+                  )
+
+                  statusText.text =
+                      "● MONITORING OFF"
               }
 
               private fun requestScreenCapture() {
                   val manager =
-                      getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                          as MediaProjectionManager
+                      getSystemService(
+                          Context.MEDIA_PROJECTION_SERVICE
+                      ) as MediaProjectionManager
 
                   startActivityForResult(
                       manager.createScreenCaptureIntent(),
@@ -161,27 +175,48 @@ jobs:
                   resultCode: Int,
                   data: Intent?
               ) {
-                  super.onActivityResult(requestCode, resultCode, data)
+                  super.onActivityResult(
+                      requestCode,
+                      resultCode,
+                      data
+                  )
 
                   if (requestCode != this.requestCode) return
 
                   if (resultCode == RESULT_OK && data != null) {
                       val serviceIntent =
-                          Intent(this, ScreenCaptureService::class.java).apply {
-                              putExtra("resultCode", resultCode)
-                              putExtra("data", data)
-                          }
+                          Intent(
+                              this,
+                              ScreenCaptureService::class.java
+                          )
+
+                      serviceIntent.putExtra(
+                          "resultCode",
+                          resultCode
+                      )
+
+                      serviceIntent.putExtra(
+                          "data",
+                          data
+                      )
 
                       startService(serviceIntent)
 
-                      statusText.text = "● MONITORING ACTIVE"
-                  } else {
-                      statusText.text = "● MONITORING CANCELLED"
+                      statusText.text =
+                          "● MONITORING ACTIVE"
                   }
+              }
+
+              override fun onDestroy() {
+                  unregisterReceiver(monitorReceiver)
+                  super.onDestroy()
               }
           }
           EOF
 
+      - name: Create ScreenCaptureService
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
           cat > app/src/main/java/com/example/aviatorai/ScreenCaptureService.kt <<'EOF'
           package com.example.aviatorai
 
@@ -203,7 +238,6 @@ jobs:
           import android.os.Handler
           import android.os.HandlerThread
           import android.os.IBinder
-          import androidx.core.app.NotificationCompat
           import com.google.mlkit.vision.common.InputImage
           import com.google.mlkit.vision.text.TextRecognition
           import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -215,11 +249,11 @@ jobs:
 
           class ScreenCaptureService : Service() {
 
-              private var mediaProjection: MediaProjection? = null
-              private var virtualDisplay: VirtualDisplay? = null
-              private var imageReader: ImageReader? = null
+              private var projection: MediaProjection? = null
+              private var display: VirtualDisplay? = null
+              private var reader: ImageReader? = null
 
-              private lateinit var handlerThread: HandlerThread
+              private lateinit var thread: HandlerThread
               private lateinit var handler: Handler
 
               private val recognizer =
@@ -227,24 +261,27 @@ jobs:
                       TextRecognizerOptions.DEFAULT_OPTIONS
                   )
 
-              private val history = ArrayList<Double>()
+              private val history =
+                  ArrayList<Double>()
 
-              private var lastProcessed = 0L
-              private var lastDetected = 0.0
+              private var lastTime = 0L
+              private var lastValue = -1.0
 
               override fun onCreate() {
                   super.onCreate()
 
-                  handlerThread =
-                      HandlerThread("AviatorScreenMonitor")
+                  thread =
+                      HandlerThread("AviatorOCR")
 
-                  handlerThread.start()
-                  handler = Handler(handlerThread.looper)
+                  thread.start()
+                  handler =
+                      Handler(thread.looper)
 
-                  createNotificationChannel()
+                  createChannel()
+
                   startForeground(
                       9001,
-                      createNotification()
+                      notification()
                   )
               }
 
@@ -255,42 +292,45 @@ jobs:
               ): Int {
 
                   if (intent == null) {
-                      return START_STICKY
+                      return START_NOT_STICKY
                   }
 
                   val resultCode =
-                      intent.getIntExtra("resultCode", -1)
+                      intent.getIntExtra(
+                          "resultCode",
+                          -1
+                      )
 
+                  @Suppress("DEPRECATION")
                   val data =
-                      if (Build.VERSION.SDK_INT >= 33) {
-                          intent.getParcelableExtra(
-                              "data",
-                              Intent::class.java
-                          )
-                      } else {
-                          @Suppress("DEPRECATION")
-                          intent.getParcelableExtra("data")
-                      }
+                      intent.getParcelableExtra<Intent>(
+                          "data"
+                      )
 
-                  if (resultCode != -1 && data != null) {
-                      startProjection(resultCode, data)
+                  if (
+                      resultCode != -1 &&
+                      data != null &&
+                      display == null
+                  ) {
+                      startCapture(
+                          resultCode,
+                          data
+                      )
                   }
 
-                  return START_STICKY
+                  return START_NOT_STICKY
               }
 
-              private fun startProjection(
+              private fun startCapture(
                   resultCode: Int,
                   data: Intent
               ) {
-                  if (virtualDisplay != null) return
-
                   val manager =
                       getSystemService(
                           Context.MEDIA_PROJECTION_SERVICE
                       ) as MediaProjectionManager
 
-                  mediaProjection =
+                  projection =
                       manager.getMediaProjection(
                           resultCode,
                           data
@@ -299,11 +339,16 @@ jobs:
                   val metrics =
                       resources.displayMetrics
 
-                  val width = metrics.widthPixels
-                  val height = metrics.heightPixels
-                  val density = metrics.densityDpi
+                  val width =
+                      metrics.widthPixels
 
-                  imageReader =
+                  val height =
+                      metrics.heightPixels
+
+                  val density =
+                      metrics.densityDpi
+
+                  reader =
                       ImageReader.newInstance(
                           width,
                           height,
@@ -311,64 +356,68 @@ jobs:
                           2
                       )
 
-                  virtualDisplay =
-                      mediaProjection?.createVirtualDisplay(
+                  display =
+                      projection?.createVirtualDisplay(
                           "AviatorMonitor",
                           width,
                           height,
                           density,
                           DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                          imageReader?.surface,
+                          reader!!.surface,
                           null,
                           handler
                       )
 
-                  imageReader?.setOnImageAvailableListener(
-                      { reader ->
-                          processLatestImage(reader)
+                  reader!!.setOnImageAvailableListener(
+                      { imageReader ->
+                          processImage(imageReader)
                       },
                       handler
                   )
               }
 
-              private fun processLatestImage(
-                  reader: ImageReader
+              private fun processImage(
+                  imageReader: ImageReader
               ) {
-                  val now = System.currentTimeMillis()
+                  val now =
+                      System.currentTimeMillis()
 
-                  if (now - lastProcessed < 800) {
-                      try {
-                          reader.acquireLatestImage()?.close()
-                      } catch (_: Exception) {
-                      }
+                  if (now - lastTime < 700) {
+                      imageReader.acquireLatestImage()
+                          ?.close()
                       return
                   }
 
-                  lastProcessed = now
+                  lastTime = now
 
                   var image: Image? = null
 
                   try {
-                      image = reader.acquireLatestImage()
-                          ?: return
+                      image =
+                          imageReader.acquireLatestImage()
+                              ?: return
 
                       val bitmap =
                           imageToBitmap(image)
                               ?: return
 
                       val input =
-                          InputImage.fromBitmap(bitmap, 0)
+                          InputImage.fromBitmap(
+                              bitmap,
+                              0
+                          )
 
                       recognizer.process(input)
                           .addOnSuccessListener { result ->
-                              detectMultiplier(result.text)
+                              findMultiplier(
+                                  result.text
+                              )
                           }
                           .addOnCompleteListener {
                               bitmap.recycle()
                           }
 
                   } catch (_: Exception) {
-                      image?.close()
                   } finally {
                       image?.close()
                   }
@@ -378,29 +427,41 @@ jobs:
                   image: Image
               ): Bitmap? {
 
-                  val plane = image.planes.firstOrNull()
-                      ?: return null
+                  val plane =
+                      image.planes.firstOrNull()
+                          ?: return null
 
-                  val buffer = plane.buffer
-                  val pixelStride = plane.pixelStride
-                  val rowStride = plane.rowStride
+                  val buffer =
+                      plane.buffer
+
+                  val pixelStride =
+                      plane.pixelStride
+
+                  val rowStride =
+                      plane.rowStride
+
                   val rowPadding =
                       rowStride -
-                          pixelStride * image.width
+                          pixelStride *
+                          image.width
 
-                  val bitmapWidth =
+                  val width =
                       image.width +
-                          rowPadding / pixelStride
+                          rowPadding /
+                          pixelStride
 
                   val bitmap =
                       Bitmap.createBitmap(
-                          bitmapWidth,
+                          width,
                           image.height,
                           Bitmap.Config.ARGB_8888
                       )
 
                   buffer.rewind()
-                  bitmap.copyPixelsFromBuffer(buffer)
+
+                  bitmap.copyPixelsFromBuffer(
+                      buffer
+                  )
 
                   return Bitmap.createBitmap(
                       bitmap,
@@ -411,11 +472,14 @@ jobs:
                   )
               }
 
-              private fun detectMultiplier(
+              private fun findMultiplier(
                   text: String
               ) {
-                  val normalized =
-                      text.replace(',', '.')
+                  val cleaned =
+                      text.replace(
+                          ',',
+                          '.'
+                      )
 
                   val pattern =
                       Pattern.compile(
@@ -423,7 +487,7 @@ jobs:
                       )
 
                   val matcher =
-                      pattern.matcher(normalized)
+                      pattern.matcher(cleaned)
 
                   val candidates =
                       ArrayList<Double>()
@@ -442,120 +506,135 @@ jobs:
                       }
                   }
 
-                  if (candidates.isEmpty()) return
+                  if (candidates.isEmpty()) {
+                      return
+                  }
 
                   val value =
                       candidates.maxOrNull()
                           ?: return
 
-                  if (abs(value - lastDetected) < 0.001) {
+                  if (
+                      abs(value - lastValue) <
+                      0.001
+                  ) {
                       return
                   }
 
-                  lastDetected = value
+                  lastValue = value
+
                   history.add(value)
 
                   while (history.size > 100) {
                       history.removeAt(0)
                   }
 
-                  val prediction =
-                      analyzeHistory(history)
+                  val estimate =
+                      calculateEstimate()
 
-                  sendUpdate(
-                      value,
-                      prediction
+                  val update =
+                      Intent(
+                          "AVIATOR_MONITOR_UPDATE"
+                      )
+
+                  update.setPackage(
+                      packageName
                   )
+
+                  update.putExtra(
+                      "detected",
+                      String.format(
+                          Locale.US,
+                          "%.2fx",
+                          value
+                      )
+                  )
+
+                  update.putExtra(
+                      "prediction",
+                      String.format(
+                          Locale.US,
+                          "%.2fx",
+                          estimate
+                      )
+                  )
+
+                  sendBroadcast(update)
               }
 
-              private fun analyzeHistory(
-                  values: List<Double>
-              ): Double {
+              private fun calculateEstimate():
+                  Double {
 
-                  if (values.isEmpty()) {
-                      return 1.00
+                  if (history.isEmpty()) {
+                      return 1.0
                   }
 
                   val recent =
-                      values.takeLast(
-                          min(10, values.size)
+                      history.takeLast(
+                          min(10, history.size)
                       )
 
                   val average =
                       recent.average()
 
                   val sorted =
-                      values.sorted()
+                      history.sorted()
 
                   val median =
-                      if (sorted.size % 2 == 0) {
+                      if (
+                          sorted.size % 2 == 0
+                      ) {
                           (
-                              sorted[sorted.size / 2 - 1] +
-                                  sorted[sorted.size / 2]
-                              ) / 2.0
+                              sorted[
+                                  sorted.size / 2 - 1
+                              ] +
+                              sorted[
+                                  sorted.size / 2
+                              ]
+                          ) / 2.0
                       } else {
-                          sorted[sorted.size / 2]
+                          sorted[
+                              sorted.size / 2
+                          ]
                       }
 
-                  val meanDeviation =
-                      recent
-                          .map {
-                              abs(it - average)
-                          }
-                          .average()
+                  val deviation =
+                      recent.map {
+                          abs(
+                              it - average
+                          )
+                      }.average()
 
                   val stability =
                       1.0 /
-                          (1.0 + meanDeviation)
+                          (1.0 + deviation)
 
                   val estimate =
                       average * 0.55 +
-                          median * 0.25 +
-                          average * stability * 0.20
+                      median * 0.25 +
+                      average *
+                      stability *
+                      0.20
 
                   return max(
-                      1.00,
-                      min(estimate, 100.0)
+                      1.0,
+                      min(
+                          estimate,
+                          100.0
+                      )
                   )
               }
 
-              private fun sendUpdate(
-                  detected: Double,
-                  prediction: Double
-              ) {
-                  val intent =
-                      Intent("AVIATOR_MONITOR_UPDATE")
-
-                  intent.setPackage(packageName)
-
-                  intent.putExtra(
-                      "detected",
-                      String.format(
-                          Locale.US,
-                          "%.2fx",
-                          detected
-                      )
-                  )
-
-                  intent.putExtra(
-                      "prediction",
-                      String.format(
-                          Locale.US,
-                          "%.2fx",
-                          prediction
-                      )
-                  )
-
-                  sendBroadcast(intent)
-              }
-
-              private fun createNotificationChannel() {
-                  if (Build.VERSION.SDK_INT >= 26) {
+              private fun createChannel() {
+                  if (
+                      Build.VERSION.SDK_INT >= 26
+                  ) {
                       val channel =
                           NotificationChannel(
                               "aviator_monitor",
-                              "Aviator Screen Monitor",
-                              NotificationManager.IMPORTANCE_LOW
+                              "Aviator Monitor",
+                              NotificationManager
+                                  .IMPORTANCE_LOW
                           )
 
                       val manager =
@@ -569,35 +648,52 @@ jobs:
                   }
               }
 
-              private fun createNotification(): Notification {
-                  return if (Build.VERSION.SDK_INT >= 26) {
-    Notification.Builder(this, "aviator_monitor")
-        .setContentTitle("Aviator Screen Monitor")
-        .setContentText("Monitoring screen for multipliers")
-        .setSmallIcon(android.R.drawable.ic_menu_view)
-        .setOngoing(true)
-        .build()
-} else {
-    @Suppress("DEPRECATION")
-    Notification.Builder(this)
-        .setContentTitle("Aviator Screen Monitor")
-        .setContentText("Monitoring screen for multipliers")
-        .setSmallIcon(android.R.drawable.ic_menu_view)
-        .setOngoing(true)
-        .build()
-}
+              private fun notification():
+                  Notification {
+
+                  return if (
+                      Build.VERSION.SDK_INT >= 26
+                  ) {
+                      Notification.Builder(
+                          this,
+                          "aviator_monitor"
+                      )
+                          .setContentTitle(
+                              "Aviator Screen Monitor"
+                          )
+                          .setContentText(
+                              "Monitoring Aviator screen"
+                          )
+                          .setSmallIcon(
+                              android.R.drawable
+                                  .ic_menu_view
+                          )
+                          .setOngoing(true)
+                          .build()
+                  } else {
+                      @Suppress("DEPRECATION")
+                      Notification.Builder(this)
+                          .setContentTitle(
+                              "Aviator Screen Monitor"
+                          )
+                          .setContentText(
+                              "Monitoring Aviator screen"
+                          )
+                          .setSmallIcon(
+                              android.R.drawable
+                                  .ic_menu_view
+                          )
+                          .setOngoing(true)
+                          .build()
+                  }
               }
 
               override fun onDestroy() {
-                  imageReader?.close()
-                  virtualDisplay?.release()
-                  mediaProjection?.stop()
+                  reader?.close()
+                  display?.release()
+                  projection?.stop()
                   recognizer.close()
-
-                  if (::handlerThread.isInitialized) {
-                      handlerThread.quitSafely()
-                  }
-
+                  thread.quitSafely()
                   super.onDestroy()
               }
 
@@ -607,7 +703,7 @@ jobs:
           }
           EOF
 
-      - name: Replace screen monitor layout
+      - name: Create monitor layout
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           mkdir -p app/src/main/res/layout
@@ -623,7 +719,6 @@ jobs:
               android:padding="24dp">
 
               <TextView
-                  android:id="@+id/titleText"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
                   android:text="AVIATOR SCREEN MONITOR"
@@ -645,7 +740,7 @@ jobs:
                   android:id="@+id/detectedText"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:text="Detected: --"
+                  android:text="Detected multiplier: --"
                   android:textSize="18sp"
                   android:padding="12dp"/>
 
@@ -672,18 +767,10 @@ jobs:
                   android:text="STOP MONITOR"
                   android:layout_marginTop="12dp"/>
 
-              <TextView
-                  android:id="@+id/infoText"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:text="The monitor reads visible multiplier text from the shared screen and builds a statistical history."
-                  android:textSize="14sp"
-                  android:padding="16dp"/>
-
           </LinearLayout>
           EOF
 
-      - name: Replace Android manifest
+      - name: Create Android manifest
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -726,15 +813,11 @@ jobs:
         run: |
           gradle clean assembleDebug --stacktrace
 
-      - name: Verify APK
+      - name: Check APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-
-          test -f "$APK"
-
-          echo "APK created:"
-          ls -lh "$APK"
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
