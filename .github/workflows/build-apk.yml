@@ -214,6 +214,164 @@ jobs:
           }
           EOF
 
+      - name: Create PatternAnalyzer
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cat > app/src/main/java/com/example/aviatorai/PatternAnalyzer.kt <<'EOF'
+          package com.example.aviatorai
+
+          import kotlin.math.abs
+
+          data class PatternResult(
+              val estimate: Double,
+              val matches: Int,
+              val evidence: String
+          )
+
+          object PatternAnalyzer {
+
+              fun analyze(
+                  history: List<Double>,
+                  patternSize: Int = 5
+              ): PatternResult {
+
+                  if (history.size < patternSize + 1) {
+                      return PatternResult(
+                          estimate = 1.0,
+                          matches = 0,
+                          evidence = "Not enough historical data"
+                      )
+                  }
+
+                  val current =
+                      history.takeLast(patternSize)
+
+                  val followUps =
+                      ArrayList<Double>()
+
+                  for (
+                      i in 0..history.size - patternSize - 1
+                  ) {
+
+                      val previous =
+                          history.subList(
+                              i,
+                              i + patternSize
+                          )
+
+                      val similarity =
+                          similarity(
+                              current,
+                              previous
+                          )
+
+                      if (similarity >= 0.78) {
+                          followUps.add(
+                              history[i + patternSize]
+                          )
+                      }
+                  }
+
+                  if (followUps.isEmpty()) {
+                      return PatternResult(
+                          estimate =
+                              history.takeLast(10).average(),
+                          matches = 0,
+                          evidence =
+                              "No similar historical pattern found"
+                      )
+                  }
+
+                  val sorted =
+                      followUps.sorted()
+
+                  val median =
+                      if (sorted.size % 2 == 0) {
+                          (
+                              sorted[
+                                  sorted.size / 2 - 1
+                              ] +
+                              sorted[
+                                  sorted.size / 2
+                              ]
+                          ) / 2.0
+                      } else {
+                          sorted[
+                              sorted.size / 2
+                          ]
+                      }
+
+                  val average =
+                      followUps.average()
+
+                  val estimate =
+                      (median * 0.60) +
+                      (average * 0.40)
+
+                  val evidence =
+                      when {
+                          followUps.size >= 10 ->
+                              "Strong historical evidence"
+
+                          followUps.size >= 5 ->
+                              "Moderate historical evidence"
+
+                          else ->
+                              "Limited historical evidence"
+                      }
+
+                  return PatternResult(
+                      estimate =
+                          estimate.coerceIn(
+                              1.0,
+                              100.0
+                          ),
+                      matches =
+                          followUps.size,
+                      evidence =
+                          evidence
+                  )
+              }
+
+              private fun similarity(
+                  a: List<Double>,
+                  b: List<Double>
+              ): Double {
+
+                  if (a.size != b.size) {
+                      return 0.0
+                  }
+
+                  var total = 0.0
+
+                  for (i in a.indices) {
+
+                      val scale =
+                          maxOf(
+                              1.0,
+                              abs(a[i]),
+                              abs(b[i])
+                          )
+
+                      val difference =
+                          abs(
+                              a[i] - b[i]
+                          ) / scale
+
+                      total +=
+                          (
+                              1.0 - difference
+                          ).coerceIn(
+                              0.0,
+                              1.0
+                          )
+                  }
+
+                  return total / a.size
+              }
+          }
+          EOF
+
       - name: Create ScreenCaptureService
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -274,6 +432,7 @@ jobs:
                       HandlerThread("AviatorOCR")
 
                   thread.start()
+
                   handler =
                       Handler(thread.looper)
 
@@ -325,6 +484,7 @@ jobs:
                   resultCode: Int,
                   data: Intent
               ) {
+
                   val manager =
                       getSystemService(
                           Context.MEDIA_PROJECTION_SERVICE
@@ -362,7 +522,8 @@ jobs:
                           width,
                           height,
                           density,
-                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                          DisplayManager
+                              .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                           reader!!.surface,
                           null,
                           handler
@@ -379,12 +540,15 @@ jobs:
               private fun processImage(
                   imageReader: ImageReader
               ) {
+
                   val now =
                       System.currentTimeMillis()
 
                   if (now - lastTime < 700) {
-                      imageReader.acquireLatestImage()
+                      imageReader
+                          .acquireLatestImage()
                           ?.close()
+
                       return
                   }
 
@@ -393,8 +557,10 @@ jobs:
                   var image: Image? = null
 
                   try {
+
                       image =
-                          imageReader.acquireLatestImage()
+                          imageReader
+                              .acquireLatestImage()
                               ?: return
 
                       val bitmap =
@@ -407,7 +573,8 @@ jobs:
                               0
                           )
 
-                      recognizer.process(input)
+                      recognizer
+                          .process(input)
                           .addOnSuccessListener { result ->
                               findMultiplier(
                                   result.text
@@ -418,6 +585,7 @@ jobs:
                           }
 
                   } catch (_: Exception) {
+
                   } finally {
                       image?.close()
                   }
@@ -428,7 +596,8 @@ jobs:
               ): Bitmap? {
 
                   val plane =
-                      image.planes.firstOrNull()
+                      image.planes
+                          .firstOrNull()
                           ?: return null
 
                   val buffer =
@@ -475,6 +644,7 @@ jobs:
               private fun findMultiplier(
                   text: String
               ) {
+
                   val cleaned =
                       text.replace(
                           ',',
@@ -493,6 +663,7 @@ jobs:
                       ArrayList<Double>()
 
                   while (matcher.find()) {
+
                       val value =
                           matcher.group(1)
                               ?.toDoubleOrNull()
@@ -571,7 +742,10 @@ jobs:
 
                   val recent =
                       history.takeLast(
-                          min(10, history.size)
+                          min(
+                              10,
+                              history.size
+                          )
                       )
 
                   val average =
@@ -584,6 +758,7 @@ jobs:
                       if (
                           sorted.size % 2 == 0
                       ) {
+
                           (
                               sorted[
                                   sorted.size / 2 - 1
@@ -592,7 +767,9 @@ jobs:
                                   sorted.size / 2
                               ]
                           ) / 2.0
+
                       } else {
+
                           sorted[
                               sorted.size / 2
                           ]
@@ -626,9 +803,11 @@ jobs:
               }
 
               private fun createChannel() {
+
                   if (
                       Build.VERSION.SDK_INT >= 26
                   ) {
+
                       val channel =
                           NotificationChannel(
                               "aviator_monitor",
@@ -654,6 +833,7 @@ jobs:
                   return if (
                       Build.VERSION.SDK_INT >= 26
                   ) {
+
                       Notification.Builder(
                           this,
                           "aviator_monitor"
@@ -670,7 +850,9 @@ jobs:
                           )
                           .setOngoing(true)
                           .build()
+
                   } else {
+
                       @Suppress("DEPRECATION")
                       Notification.Builder(this)
                           .setContentTitle(
@@ -689,11 +871,13 @@ jobs:
               }
 
               override fun onDestroy() {
+
                   reader?.close()
                   display?.release()
                   projection?.stop()
                   recognizer.close()
                   thread.quitSafely()
+
                   super.onDestroy()
               }
 
