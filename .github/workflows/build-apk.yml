@@ -1,6 +1,6 @@
 name: Inspect Aviator v0.2
 
-"on":
+on:
   workflow_dispatch:
 
 jobs:
@@ -8,32 +8,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect v0.2 ZIP
-        shell: bash
+      - name: Inspect ZIP
         run: |
-          set -e
-
-          echo "===== ZIP FILE ====="
-          ls -lh Aviator_Screen_Monitor_P703_v0.2.zip
-
-          echo "===== ZIP CONTENTS ====="
           unzip -l Aviator_Screen_Monitor_P703_v0.2.zip
-
-          echo "===== EXTRACT ====="
-          rm -rf extracted
-          mkdir extracted
-          unzip -q Aviator_Screen_Monitor_P703_v0.2.zip -d extracted
-
-          echo "===== PROJECT TREE ====="
-          find extracted -maxdepth 8 -type f | sort
-
-          echo "===== GRADLE FILES ====="
-          find extracted -type f \( \
-            -name "build.gradle" -o \
-            -name "build.gradle.kts" -o \
-            -name "settings.gradle" -o \
-            -name "settings.gradle.kts" \
-          \) -print
