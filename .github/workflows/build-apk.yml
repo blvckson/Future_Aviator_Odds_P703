@@ -1,6 +1,6 @@
 name: Inspect Aviator v0.2
 
-on:
+"on":
   workflow_dispatch:
 
 jobs:
