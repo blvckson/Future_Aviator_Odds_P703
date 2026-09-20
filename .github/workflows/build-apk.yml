@@ -1,25 +1,27 @@
-name: Inspect Aviator v0.2
+name: Extract Aviator v0.2 Source
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspect:
+  extract:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract ZIP
+      - name: Extract source
         run: |
           rm -rf extracted
           mkdir extracted
           unzip -q Aviator_Screen_Monitor_P703_v0.2.zip -d extracted
-          find extracted -type f | sort > file-list.txt
+          mkdir source-files
+          cp -r extracted/app/src/main/java source-files/
+          cp -r extracted/app/src/main/AndroidManifest.xml source-files/
 
-      - name: Upload inspection
+      - name: Upload source
         uses: actions/upload-artifact@v4
         with:
-          name: aviator-v02-file-list
-          path: file-list.txt
+          name: aviator-v02-source
+          path: source-files
