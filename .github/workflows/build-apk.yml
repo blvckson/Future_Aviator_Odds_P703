@@ -11,6 +11,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect ZIP
+      - name: Extract ZIP
         run: |
-          unzip -l Aviator_Screen_Monitor_P703_v0.2.zip
+          rm -rf extracted
+          mkdir extracted
+          unzip -q Aviator_Screen_Monitor_P703_v0.2.zip -d extracted
+          find extracted -type f | sort > file-list.txt
+
+      - name: Upload inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: aviator-v02-file-list
+          path: file-list.txt
